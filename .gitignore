@@ -1,0 +1,17 @@
+# Compiler files
+*.bin
+*.abi
+*.json
+!package.json
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+package-lock.json

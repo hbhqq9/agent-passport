@@ -1,5 +1,7 @@
 """
-Contract addresses and minimal ABIs for Agent Passport V0 on Base Mainnet.
+Contract addresses and minimal ABIs for Agent Passport V2 on Base Mainnet.
+
+All ABIs are matched to the actual deployed contracts verified via end-to-end testing.
 """
 
 # ── Deployed Contract Addresses (Base Mainnet) ──────────────────────────────
@@ -11,7 +13,7 @@ ADDRESSES = {
 }
 
 # ── Minimal ABIs ────────────────────────────────────────────────────────────
-# Only the functions the SDK actually calls.
+# Only the functions the SDK actually calls, matched to on-chain deployments.
 
 AGENT_REGISTRY_ABI = [
     {
@@ -21,35 +23,39 @@ AGENT_REGISTRY_ABI = [
             {"name": "metadataURI", "type": "string"},
         ],
         "name": "registerAgent",
-        "outputs": [{"name": "agentId", "type": "bytes32"}],
+        "outputs": [{"name": "agentId", "type": "uint256"}],
         "stateMutability": "nonpayable",
         "type": "function",
     },
     {
-        "inputs": [{"name": "agentId", "type": "bytes32"}],
-        "name": "getAgent",
+        "inputs": [{"name": "agentId", "type": "uint256"}],
+        "name": "getAgentInfo",
         "outputs": [
-            {"name": "name", "type": "string"},
-            {"name": "operator", "type": "address"},
-            {"name": "active", "type": "bool"},
-            {"name": "metadataURI", "type": "string"},
-            {"name": "registeredAt", "type": "uint256"},
+            {
+                "name": "",
+                "type": "tuple",
+                "components": [
+                    {"name": "owner", "type": "address"},
+                    {"name": "agentWallet", "type": "address"},
+                    {"name": "agentURI", "type": "string"},
+                    {"name": "registeredAt", "type": "uint256"},
+                    {"name": "active", "type": "bool"},
+                ],
+            }
         ],
         "stateMutability": "view",
         "type": "function",
     },
     {
-        "inputs": [{"name": "agentId", "type": "bytes32"}],
-        "name": "isRegistered",
-        "outputs": [{"name": "", "type": "bool"}],
-        "stateMutability": "view",
-        "type": "function",
-    },
-    {
-        "inputs": [{"name": "operator", "type": "address"}],
-        "name": "getAgentCount",
-        "outputs": [{"name": "", "type": "uint256"}],
-        "stateMutability": "view",
+        "inputs": [
+            {"name": "agentId", "type": "uint256"},
+            {"name": "wallet", "type": "address"},
+            {"name": "deadline", "type": "uint256"},
+            {"name": "signature", "type": "bytes"},
+        ],
+        "name": "bindWallet",
+        "outputs": [],
+        "stateMutability": "nonpayable",
         "type": "function",
     },
 ]
@@ -57,12 +63,14 @@ AGENT_REGISTRY_ABI = [
 AGENT_PASSPORT_ABI = [
     {
         "inputs": [
-            {"name": "agentId", "type": "bytes32"},
-            {"name": "scope", "type": "string"},
-            {"name": "evidenceURI", "type": "string"},
+            {"name": "agentId", "type": "uint256"},
+            {"name": "attributeType", "type": "uint8"},
+            {"name": "attributeValue", "type": "string"},
+            {"name": "schemaURI", "type": "string"},
+            {"name": "validUntil", "type": "uint256"},
         ],
         "name": "issueAttestation",
-        "outputs": [{"name": "attestationId", "type": "uint256"}],
+        "outputs": [],
         "stateMutability": "nonpayable",
         "type": "function",
     },
@@ -70,29 +78,28 @@ AGENT_PASSPORT_ABI = [
         "inputs": [{"name": "attestationId", "type": "uint256"}],
         "name": "getAttestation",
         "outputs": [
-            {"name": "agentId", "type": "bytes32"},
-            {"name": "scope", "type": "string"},
-            {"name": "evidenceURI", "type": "string"},
-            {"name": "issuer", "type": "address"},
-            {"name": "issuedAt", "type": "uint256"},
-            {"name": "revoked", "type": "bool"},
+            {
+                "name": "",
+                "type": "tuple",
+                "components": [
+                    {"name": "attestationId", "type": "uint256"},
+                    {"name": "agentId", "type": "uint256"},
+                    {"name": "verifier", "type": "address"},
+                    {"name": "attributeType", "type": "uint8"},
+                    {"name": "attributeHash", "type": "bytes32"},
+                    {"name": "schemaURI", "type": "string"},
+                    {"name": "validUntil", "type": "uint256"},
+                    {"name": "issuedAt", "type": "uint256"},
+                    {"name": "revoked", "type": "bool"},
+                ],
+            }
         ],
         "stateMutability": "view",
         "type": "function",
     },
     {
-        "inputs": [
-            {"name": "agentId", "type": "bytes32"},
-            {"name": "scope", "type": "string"},
-        ],
-        "name": "hasAttestation",
-        "outputs": [{"name": "", "type": "bool"}],
-        "stateMutability": "view",
-        "type": "function",
-    },
-    {
-        "inputs": [{"name": "agentId", "type": "bytes32"}],
-        "name": "getAttestationsByAgent",
+        "inputs": [{"name": "agentId", "type": "uint256"}],
+        "name": "getAgentAttestationIds",
         "outputs": [{"name": "", "type": "uint256[]"}],
         "stateMutability": "view",
         "type": "function",
@@ -102,27 +109,14 @@ AGENT_PASSPORT_ABI = [
 ACCESS_GATEWAY_ABI = [
     {
         "inputs": [
-            {"name": "agentId", "type": "bytes32"},
-            {"name": "resource", "type": "string"},
+            {"name": "agentWallet", "type": "address"},
+            {"name": "message", "type": "bytes32"},
+            {"name": "signature", "type": "bytes"},
         ],
-        "name": "checkAccess",
+        "name": "verifyProofOfAgent",
         "outputs": [
-            {"name": "allowed", "type": "bool"},
-            {"name": "reason", "type": "string"},
-        ],
-        "stateMutability": "view",
-        "type": "function",
-    },
-    {
-        "inputs": [
-            {"name": "agentId", "type": "bytes32"},
-            {"name": "requiredScope", "type": "string"},
-        ],
-        "name": "verifyDelegation",
-        "outputs": [
-            {"name": "valid", "type": "bool"},
-            {"name": "delegator", "type": "address"},
-            {"name": "expiresAt", "type": "uint256"},
+            {"name": "isValid", "type": "bool"},
+            {"name": "agentId", "type": "uint256"},
         ],
         "stateMutability": "view",
         "type": "function",
@@ -131,34 +125,51 @@ ACCESS_GATEWAY_ABI = [
 
 COMPLIANCE_PASSPORT_ABI = [
     {
-        "inputs": [{"name": "agentId", "type": "bytes32"}],
-        "name": "getComplianceStatus",
-        "outputs": [
-            {"name": "art50Compliant", "type": "bool"},
-            {"name": "riskScore", "type": "uint8"},
-            {"name": "disclosureLevel", "type": "string"},
-            {"name": "lastAudit", "type": "uint256"},
+        "inputs": [
+            {"name": "agentId", "type": "uint256"},
+            {"name": "score", "type": "uint8"},
+            {"name": "validUntil", "type": "uint256"},
+            {"name": "evidenceHash", "type": "bytes32"},
+            {"name": "scorerURI", "type": "string"},
         ],
-        "stateMutability": "view",
+        "name": "recordRiskScore",
+        "outputs": [],
+        "stateMutability": "nonpayable",
         "type": "function",
     },
     {
         "inputs": [
-            {"name": "agentId", "type": "bytes32"},
-            {"name": "interactionType", "type": "string"},
+            {"name": "agentId", "type": "uint256"},
+            {"name": "complianceLevel", "type": "uint8"},
+            {"name": "evidenceHash", "type": "bytes32"},
+            {"name": "validUntil", "type": "uint256"},
         ],
-        "name": "generateDisclosure",
+        "name": "issueCertificate",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [{"name": "certId", "type": "uint256"}],
+        "name": "getCertificate",
         "outputs": [
-            {"name": "headerValue", "type": "string"},
-            {"name": "metadata", "type": "string"},
+            {"name": "certId", "type": "uint256"},
+            {"name": "agentId", "type": "uint256"},
+            {"name": "riskScore", "type": "uint8"},
+            {"name": "complianceLevel", "type": "uint8"},
+            {"name": "evidenceHash", "type": "bytes32"},
+            {"name": "validUntil", "type": "uint256"},
+            {"name": "issuedAt", "type": "uint256"},
+            {"name": "issuer", "type": "address"},
+            {"name": "revoked", "type": "bool"},
         ],
         "stateMutability": "view",
         "type": "function",
     },
     {
-        "inputs": [{"name": "agentId", "type": "bytes32"}],
-        "name": "isCompliant",
-        "outputs": [{"name": "", "type": "bool"}],
+        "inputs": [{"name": "agentId", "type": "uint256"}],
+        "name": "getAgentCertificateIds",
+        "outputs": [{"name": "", "type": "uint256[]"}],
         "stateMutability": "view",
         "type": "function",
     },

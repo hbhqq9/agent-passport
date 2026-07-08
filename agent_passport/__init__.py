@@ -1,5 +1,5 @@
 """
-Agent Passport Python SDK V0.1
+Agent Passport Python SDK V2.0
 AI Agent compliance proof system for EU AI Act Art.50
 
 Usage:
@@ -8,19 +8,25 @@ Usage:
     client = AgentPassportClient(rpc_url="https://mainnet.base.org")
     set_default_client(client)
 """
-from .core import AgentPassportClient, AgentInfo, AttestationInfo, ComplianceInfo
-from .guard import passport_guard, set_default_client, ComplianceError
+from .core import (
+    AgentPassportClient,
+    AgentInfo,
+    AttestationInfo,
+    CertificateInfo,
+)
+from .guard import passport_guard, set_default_client, get_default_client, ComplianceError
 from .compliance import Art50ComplianceChecker
 from .delegation import DelegationManager
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     "AgentPassportClient",
     "AgentInfo",
     "AttestationInfo",
-    "ComplianceInfo",
+    "CertificateInfo",
     "passport_guard",
     "set_default_client",
+    "get_default_client",
     "ComplianceError",
     "Art50ComplianceChecker",
     "DelegationManager",

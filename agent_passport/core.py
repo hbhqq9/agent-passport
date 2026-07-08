@@ -1,45 +1,61 @@
 """
-AgentPassportClient - Core client for interacting with Agent Passport smart contracts.
+AgentPassportClient - Core client for interacting with Agent Passport V2 smart contracts.
+
+All ABI calls are matched to the actual deployed contracts on Base Mainnet.
 """
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from web3 import Web3
 from web3.contract import Contract
 
-from .contracts import ADDRESSES, AGENT_REGISTRY_ABI, AGENT_PASSPORT_ABI, ACCESS_GATEWAY_ABI, COMPLIANCE_PASSPORT_ABI
+from .contracts import (
+    ADDRESSES,
+    AGENT_REGISTRY_ABI,
+    AGENT_PASSPORT_ABI,
+    ACCESS_GATEWAY_ABI,
+    COMPLIANCE_PASSPORT_ABI,
+)
 
 
 # ── Data Classes ───────────────────────────────────────────────────────────────
 
 @dataclass
 class AgentInfo:
-    """Represents a registered AI Agent."""
-    name: str
-    operator: str
-    active: bool
-    metadata_uri: str
+    """Represents a registered AI Agent (from AgentRegistry.getAgentInfo)."""
+    owner: str
+    agent_wallet: str
+    agent_uri: str
     registered_at: int
+    active: bool
 
 
 @dataclass
 class AttestationInfo:
-    """Represents an attestation (compliance proof) issued to an agent."""
-    agent_id: bytes
-    scope: str
-    evidence_uri: str
-    issuer: str
+    """Represents an attestation issued by AgentPassport.getAttestation."""
+    attestation_id: int
+    agent_id: int
+    verifier: str
+    attribute_type: int
+    attribute_hash: bytes
+    schema_uri: str
+    valid_until: int
     issued_at: int
     revoked: bool
 
 
 @dataclass
-class ComplianceInfo:
-    """Represents the Art.50 compliance status of an agent."""
-    art50_compliant: bool
+class CertificateInfo:
+    """Represents a compliance certificate from CompliancePassport.getCertificate."""
+    cert_id: int
+    agent_id: int
     risk_score: int
-    disclosure_level: str
-    last_audit: int
+    compliance_level: int
+    evidence_hash: bytes
+    valid_until: int
+    issued_at: int
+    issuer: str
+    revoked: bool
 
 
 # ── Client ─────────────────────────────────────────────────────────────────────
@@ -50,7 +66,7 @@ BASE_CHAIN_ID = 8453
 
 class AgentPassportClient:
     """
-    Main SDK client for interacting with the Agent Passport protocol on Base mainnet.
+    Main SDK client for interacting with the Agent Passport V2 protocol on Base mainnet.
 
     Args:
         rpc_url:      Base mainnet RPC endpoint (default: https://mainnet.base.org).
@@ -68,7 +84,8 @@ class AgentPassportClient:
         chain_id = self._w3.eth.chain_id
         if chain_id != BASE_CHAIN_ID:
             raise ConnectionError(
-                f"Connected to wrong chain (id={chain_id}). Base mainnet expected (id={BASE_CHAIN_ID})."
+                f"Connected to wrong chain (id={chain_id}). "
+                f"Base mainnet expected (id={BASE_CHAIN_ID})."
             )
 
         self._private_key = private_key
@@ -113,33 +130,39 @@ class AgentPassportClient:
             "nonce": self._w3.eth.get_transaction_count(self._account.address),
             "chainId": BASE_CHAIN_ID,
         })
-        signed = self._w3.eth.account.sign_transaction(tx, private_key=self._private_key)
+        signed = self._w3.eth.account.sign_transaction(
+            tx, private_key=self._private_key
+        )
         tx_hash = self._w3.eth.send_raw_transaction(signed.raw_transaction)
         receipt = self._w3.eth.wait_for_transaction_receipt(tx_hash)
         return receipt
 
     @staticmethod
-    def _to_agent_id(agent_id) -> bytes:
-        """Normalise agent_id to bytes32."""
-        if isinstance(agent_id, bytes):
-            if len(agent_id) < 32:
-                agent_id = agent_id.rjust(32, b"\x00")
+    def _to_agent_id(agent_id) -> int:
+        """
+        Normalise agent_id to uint256 (Python int).
+
+        Accepts int directly, or numeric strings (decimal / hex).
+        Agent IDs are uint256 starting from 1.
+        """
+        if isinstance(agent_id, int):
             return agent_id
         if isinstance(agent_id, str):
-            if agent_id.startswith("0x"):
-                raw = bytes.fromhex(agent_id[2:])
-            else:
-                raw = agent_id.encode("utf-8")
-            if len(raw) < 32:
-                raw = raw.rjust(32, b"\x00")
-            return raw
-        raise TypeError(f"Unsupported agent_id type: {type(agent_id)}")
+            if agent_id.startswith("0x") or agent_id.startswith("0X"):
+                return int(agent_id, 16)
+            return int(agent_id)
+        raise TypeError(
+            f"Unsupported agent_id type: {type(agent_id)}. "
+            "Expected int or numeric string."
+        )
 
     # ── Write Operations ─────────────────────────────────────────────────────
 
-    def register_agent(self, name: str, operator: str, metadata_uri: str = "") -> bytes:
+    def register_agent(
+        self, name: str, operator: str, metadata_uri: str = ""
+    ) -> int:
         """
-        Register a new AI Agent on-chain.
+        Register a new AI Agent on-chain via AgentRegistry.registerAgent.
 
         Args:
             name:         Human-readable agent name.
@@ -147,77 +170,153 @@ class AgentPassportClient:
             metadata_uri: Optional URI pointing to agent metadata.
 
         Returns:
-            bytes32: The agent's on-chain identifier.
+            int: The new agentId (uint256, starting from 1).
         """
         self._require_account()
         operator_addr = Web3.to_checksum_address(operator)
         receipt = self._send_tx(
-            self._agent_registry.functions.registerAgent(name, operator_addr, metadata_uri)
+            self._agent_registry.functions.registerAgent(
+                name, operator_addr, metadata_uri
+            )
         )
-        # Parse agentId from logs
+        # Parse agentId from transaction return value or logs.
+        # The function returns uint256, but we need to parse from receipt.
+        # Try to decode from logs first (look for Registered event).
         logs = receipt.get("logs", [])
         if logs:
-            # First topic after event signature is often the agentId
-            topics = logs[0].get("topics", [])
-            if len(topics) >= 2:
-                return bytes(topics[1])
-        # Fallback: derive from name
-        agent_id = Web3.keccak(text=f"{name}:{operator}")[:32]
-        return agent_id
+            # Typically the first log topic after event sig contains the agentId
+            for log in logs:
+                topics = log.get("topics", [])
+                if len(topics) >= 2:
+                    # agentId is usually the first indexed param after event sig
+                    candidate = int.from_bytes(topics[1], "big")
+                    if candidate > 0:
+                        return candidate
+        # Fallback: try to read the return data via eth_call with same params
+        # to simulate the call and get the return value.
+        try:
+            agent_id = (
+                self._agent_registry.functions.registerAgent(
+                    name, operator_addr, metadata_uri
+                )
+                .call()
+            )
+            if agent_id and agent_id > 0:
+                return int(agent_id)
+        except Exception:
+            pass
 
-    def issue_attestation(self, agent_id, scope: str, evidence_uri: str) -> int:
+        raise RuntimeError(
+            "Could not determine agentId from transaction receipt. "
+            f"Transaction hash: {receipt.get('transactionHash', 'unknown')}"
+        )
+
+    def issue_attestation(
+        self,
+        agent_id: int,
+        attribute_type: int,
+        attribute_value: str,
+        schema_uri: str = "",
+        valid_until: int = 0,
+    ) -> None:
         """
-        Issue a compliance attestation for an agent.
+        Issue an attestation for an agent via AgentPassport.issueAttestation.
+        Requires VERIFIER_ROLE on the contract.
 
         Args:
-            agent_id:    bytes32 agent identifier.
-            scope:       Scope string (e.g. "art50", "general", "data_access").
-            evidence_uri: URI pointing to attestation evidence.
-
-        Returns:
-            int: The attestation ID.
+            agent_id:        uint256 agent identifier (starts from 1).
+            attribute_type:  uint8 attribute type code.
+            attribute_value: The attribute value string.
+            schema_uri:      Optional URI pointing to the schema definition.
+            valid_until:     Unix timestamp when the attestation expires (0 = no expiry).
         """
         self._require_account()
         aid = self._to_agent_id(agent_id)
-        receipt = self._send_tx(
-            self._agent_passport.functions.issueAttestation(aid, scope, evidence_uri)
+        self._send_tx(
+            self._agent_passport.functions.issueAttestation(
+                aid, attribute_type, attribute_value, schema_uri, valid_until
+            )
         )
-        logs = receipt.get("logs", [])
-        if logs:
-            topics = logs[0].get("topics", [])
-            if len(topics) >= 2:
-                return int.from_bytes(topics[1], "big")
-        # Fallback: derive from inputs
-        att_id = int.from_bytes(Web3.keccak(aid + scope.encode())[:32], "big")
-        return att_id
+
+    def issue_certificate(
+        self,
+        agent_id: int,
+        compliance_level: int,
+        evidence_hash: bytes,
+        valid_until: int,
+    ) -> None:
+        """
+        Issue a compliance certificate via CompliancePassport.issueCertificate.
+        Requires SCORER_ROLE on the contract.
+
+        Args:
+            agent_id:          uint256 agent identifier.
+            compliance_level:  uint8 compliance level (0-255).
+            evidence_hash:     bytes32 evidence hash.
+            valid_until:       Unix timestamp when the certificate expires.
+        """
+        self._require_account()
+        aid = self._to_agent_id(agent_id)
+        self._send_tx(
+            self._compliance_passport.functions.issueCertificate(
+                aid, compliance_level, evidence_hash, valid_until
+            )
+        )
+
+    def record_risk_score(
+        self,
+        agent_id: int,
+        score: int,
+        valid_until: int,
+        evidence_hash: bytes,
+        scorer_uri: str = "",
+    ) -> None:
+        """
+        Record a risk score for an agent via CompliancePassport.recordRiskScore.
+        Requires SCORER_ROLE on the contract.
+
+        Args:
+            agent_id:      uint256 agent identifier.
+            score:         uint8 risk score (0-255).
+            valid_until:   Unix timestamp when the score expires.
+            evidence_hash: bytes32 evidence hash.
+            scorer_uri:    Optional URI pointing to scorer metadata.
+        """
+        self._require_account()
+        aid = self._to_agent_id(agent_id)
+        self._send_tx(
+            self._compliance_passport.functions.recordRiskScore(
+                aid, score, valid_until, evidence_hash, scorer_uri
+            )
+        )
 
     # ── Read Operations ──────────────────────────────────────────────────────
 
-    def get_agent(self, agent_id) -> AgentInfo:
+    def get_agent(self, agent_id: int) -> AgentInfo:
         """
-        Query agent information from the registry.
+        Query agent information from the registry via getAgentInfo(uint256).
 
         Args:
-            agent_id: bytes32 agent identifier.
+            agent_id: uint256 agent identifier (int, starting from 1).
 
         Returns:
             AgentInfo dataclass.
         """
         aid = self._to_agent_id(agent_id)
-        name, operator, active, metadata_uri, registered_at = (
-            self._agent_registry.functions.getAgent(aid).call()
-        )
+        result = self._agent_registry.functions.getAgentInfo(aid).call()
+        # Contract returns a struct (tuple), unpack from result[0]
+        info = result[0] if isinstance(result[0], tuple) else result
         return AgentInfo(
-            name=name,
-            operator=operator,
-            active=active,
-            metadata_uri=metadata_uri,
-            registered_at=registered_at,
+            owner=info[0],
+            agent_wallet=info[1],
+            agent_uri=info[2],
+            registered_at=info[3],
+            active=info[4],
         )
 
     def get_attestation(self, attestation_id: int) -> AttestationInfo:
         """
-        Query attestation details.
+        Query attestation details via getAttestation(uint256).
 
         Args:
             attestation_id: uint256 attestation identifier.
@@ -225,82 +324,122 @@ class AgentPassportClient:
         Returns:
             AttestationInfo dataclass.
         """
-        agent_id, scope, evidence_uri, issuer, issued_at, revoked = (
-            self._agent_passport.functions.getAttestation(attestation_id).call()
-        )
+        result = self._agent_passport.functions.getAttestation(attestation_id).call()
+        # Contract returns a struct (tuple), unpack from result[0]
+        info = result[0] if isinstance(result[0], tuple) else result
         return AttestationInfo(
-            agent_id=agent_id,
-            scope=scope,
-            evidence_uri=evidence_uri,
-            issuer=issuer,
-            issued_at=issued_at,
-            revoked=revoked,
+            attestation_id=info[0],
+            agent_id=info[1],
+            verifier=info[2],
+            attribute_type=info[3],
+            attribute_hash=info[4],
+            schema_uri=info[5],
+            valid_until=info[6],
+            issued_at=info[7],
+            revoked=info[8],
         )
 
-    def verify_agent(self, agent_id, required_scope: str = "general") -> bool:
+    def get_agent_attestation_ids(self, agent_id: int) -> List[int]:
         """
-        Verify that an agent holds a valid attestation with the given scope.
+        Get all attestation IDs for an agent via getAgentAttestationIds(uint256).
 
         Args:
-            agent_id:       bytes32 agent identifier.
-            required_scope: The scope the agent must be attested for.
+            agent_id: uint256 agent identifier.
 
         Returns:
-            True if the agent has a valid, non-revoked attestation for the scope.
+            List of attestation IDs (uint256).
         """
         aid = self._to_agent_id(agent_id)
-        try:
-            has_scope = self._agent_passport.functions.hasAttestation(aid, required_scope).call()
-            if not has_scope:
-                return False
-            # Check the agent is still active
-            is_registered = self._agent_registry.functions.isRegistered(aid).call()
-            if not is_registered:
-                return False
-            agent_info = self.get_agent(aid)
-            return agent_info.active
-        except Exception:
-            return False
+        return list(
+            self._agent_passport.functions.getAgentAttestationIds(aid).call()
+        )
 
-    def get_compliance_status(self, agent_id) -> ComplianceInfo:
+    def verify_agent(
+        self,
+        agent_wallet: str,
+        message: bytes,
+        signature: bytes,
+    ) -> Tuple[bool, int]:
         """
-        Get the Art.50 compliance status for an agent.
+        Verify proof of agent ownership via AccessGateway.verifyProofOfAgent.
 
         Args:
-            agent_id: bytes32 agent identifier.
+            agent_wallet: The agent's Ethereum address.
+            message:      bytes32 message that was signed.
+            signature:    The signature bytes.
 
         Returns:
-            ComplianceInfo dataclass.
+            Tuple of (is_valid: bool, agent_id: int).
         """
-        aid = self._to_agent_id(agent_id)
-        art50_compliant, risk_score, disclosure_level, last_audit = (
-            self._compliance_passport.functions.getComplianceStatus(aid).call()
+        wallet_addr = Web3.to_checksum_address(agent_wallet)
+        # Ensure message is bytes32
+        if len(message) < 32:
+            message = message.ljust(32, b"\x00")
+        elif len(message) > 32:
+            message = message[:32]
+        is_valid, agent_id = (
+            self._access_gateway.functions.verifyProofOfAgent(
+                wallet_addr, message, signature
+            ).call()
         )
-        return ComplianceInfo(
-            art50_compliant=art50_compliant,
-            risk_score=risk_score,
-            disclosure_level=disclosure_level,
-            last_audit=last_audit,
-        )
+        return (bool(is_valid), int(agent_id))
 
-    def generate_disclosure(self, agent_id, interaction_type: str = "chat") -> dict:
+    def get_certificate(self, cert_id: int) -> CertificateInfo:
         """
-        Generate an Art.50 disclosure header for an agent interaction.
+        Query certificate details via getCertificate(uint256).
 
         Args:
-            agent_id:         bytes32 agent identifier.
-            interaction_type: Type of interaction (e.g. "chat", "voice", "email").
+            cert_id: uint256 certificate identifier.
 
         Returns:
-            dict with 'header_value' and 'metadata' keys.
+            CertificateInfo dataclass.
+        """
+        result = (
+            self._compliance_passport.functions.getCertificate(cert_id).call()
+        )
+        return CertificateInfo(
+            cert_id=result[0],
+            agent_id=result[1],
+            risk_score=result[2],
+            compliance_level=result[3],
+            evidence_hash=result[4],
+            valid_until=result[5],
+            issued_at=result[6],
+            issuer=result[7],
+            revoked=result[8],
+        )
+
+    def get_agent_certificate_ids(self, agent_id: int) -> List[int]:
+        """
+        Get all certificate IDs for an agent via getAgentCertificateIds(uint256).
+
+        Args:
+            agent_id: uint256 agent identifier.
+
+        Returns:
+            List of certificate IDs (uint256).
         """
         aid = self._to_agent_id(agent_id)
-        header_value, metadata = (
-            self._compliance_passport.functions.generateDisclosure(aid, interaction_type).call()
+        return list(
+            self._compliance_passport.functions.getAgentCertificateIds(aid).call()
         )
-        return {
-            "header_value": header_value,
-            "metadata": metadata,
-            "interaction_type": interaction_type,
-            "agent_id": agent_id.hex() if isinstance(agent_id, bytes) else str(agent_id),
-        }
+
+    def get_compliance_status(self, agent_id: int) -> List[CertificateInfo]:
+        """
+        Get all compliance certificates for an agent.
+
+        Args:
+            agent_id: uint256 agent identifier.
+
+        Returns:
+            List of CertificateInfo dataclasses.
+        """
+        cert_ids = self.get_agent_certificate_ids(agent_id)
+        certificates = []
+        for cid in cert_ids:
+            try:
+                cert = self.get_certificate(cid)
+                certificates.append(cert)
+            except Exception:
+                continue
+        return certificates

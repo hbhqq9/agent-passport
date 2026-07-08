@@ -1,55 +1,96 @@
-# Agent Passport
+# Agent Passport SDK
 
-**AI Agent Compliance Proof System for EU AI Act Art.50**
+**5-minute EU AI Act Art.50 compliance for AI Agents on Base.**
 
-Agent Passport provides on-chain compliance infrastructure enabling AI agents to prove regulatory compliance (EU AI Act Article 50) through verifiable, tamper-proof credentials on Base Mainnet.
+Agent Passport is a compliance proof system that helps platforms ensure every AI agent they interact with carries verifiable proof of regulatory compliance — starting with Art.50 disclosure obligations.
+
+## Install
+
+```bash
+pip install agent-passport-agl
+```
 
 ## Quick Start
 
-```bash
-pip install agent-passport
+```python
+from agent_passport import AgentPassportClient, passport_guard, set_default_client
+
+# Initialize (read-only)
+client = AgentPassportClient(rpc_url="https://mainnet.base.org")
+set_default_client(client)
+
+# Protect your agent handler with one decorator
+@passport_guard(required_scope=1)  # attribute_type=1 for Art.50
+def handle(agent_id, query):
+    return f"Compliant response to: {query}"
 ```
+
+## Register an Agent
 
 ```python
-from agent_passport import AgentPassportClient, passport_guard
-
-client = AgentPassportClient(rpc_url="https://mainnet.base.org")
-
-@passport_guard(required_scope="data_access")
-def handle_request(agent_id: str, query: str):
-    return f"Processing: {query}"
+client = AgentPassportClient(
+    rpc_url="https://mainnet.base.org",
+    private_key="0xYOUR_KEY"
+)
+agent_id = client.register_agent(
+    name="MyAgent",
+    operator="0xYourAddress",
+    metadata_uri="https://example.com/metadata.json"
+)
+print(f"Registered agent with ID: {agent_id}")  # uint256, starts at 1
 ```
 
-## Project Structure
+## Art.50 Disclosure
 
-- `agent_passport/` - Python SDK package
-- `agent-passport/` - Whitepapers, architecture docs, analysis
-- `contracts/` - ERC-8226 Adapter smart contracts
-- `docs/` - Blog posts and announcements
-- `art50-self-assessment.html` - Art.50 compliance self-assessment tool
+```python
+from agent_passport import Art50ComplianceChecker
+
+checker = Art50ComplianceChecker(client)
+header = checker.generate_disclosure_header(agent_id, interaction_type="chat")
+# => X-AI-Disclosure: agent=1; compliant=true; compliance_level=2; type=chat
+```
 
 ## Deployed Contracts (Base Mainnet)
 
-| Contract | Address |
-|----------|---------|
-| AgentRegistry | `0xbfd8Be6cBDa1Fb7A262E2A49c321E083a73638C9` |
-| AgentPassport | `0x612Fdf1DFCABf73131DD1D517C5f365cC3FD4b96` |
-| AccessGateway | `0x3dD4c216bc82145CDb1AF30b94d84383aa9292f9` |
-| CompliancePassport | `0x799B35c31DeF0fB679F46026f81743D397A27959` |
-| ERC8226Adapter | `0xE87b5F4D18E431cBFb281A5Af376DAE2995bbC0d` |
-| OpenBD | `0x9Deb1842d10f536c91Ef69b1f146d4B84ACe966B` |
+| Contract          | Address                                      |
+|-------------------|----------------------------------------------|
+| AgentRegistry     | `0xbeeFd54855e133055c6C5be8fD6549c3Fd92e0D9` |
+| AgentPassport     | `0x5eBD4fCE45754c34557a237dd59cecec7A410c87` |
+| AccessGateway     | `0xC46C3538Ea1Ea3dc41b762A2b298DD3C4cc65594` |
+| CompliancePassport| `0x1A086e034C7020CFE12d1ff8082Fc6aeD5787680` |
 
-## Documentation
+## Features
 
-- [V0 Whitepaper](agent-passport/AGENT_PASSPORT_WHITEPAPER_V0.md)
-- [中文白皮书](agent-passport/AGENT_PASSPORT_WHITEPAPER_V0_CN.md)
-- [Architecture](agent-passport/ARCHITECTURE.md)
-- [Competitive Research](agent-passport/COMPETITIVE_RESEARCH.md)
-- [V0.1 Pivot Strategy](agent-passport/AGENT_PASSPORT_DUAN_YONGPING_ANALYSIS.md)
+- **`@passport_guard`** — Decorator to enforce compliance checks on any handler
+- **`Art50ComplianceChecker`** — Check compliance status and generate disclosure headers
+- **`DelegationManager`** — Create and verify agent delegation proofs via EIP-712
+- **Read-only mode** — No private key needed for verification and queries
+- **V2 Contracts** — All ABIs matched to actual on-chain deployments on Base Mainnet
+
+## API Overview
+
+### AgentPassportClient
+
+| Method | Description |
+|--------|-------------|
+| `register_agent(name, operator, metadata_uri)` | Register a new agent, returns `int` agentId |
+| `get_agent(agent_id)` | Get agent info → `AgentInfo(owner, agent_wallet, agent_uri, registered_at, active)` |
+| `issue_attestation(agent_id, attribute_type, attribute_value, schema_uri, valid_until)` | Issue attestation (requires VERIFIER_ROLE) |
+| `get_attestation(attestation_id)` | Get attestation details → `AttestationInfo` |
+| `get_agent_attestation_ids(agent_id)` | List attestation IDs for an agent |
+| `verify_agent(agent_wallet, message, signature)` | Verify proof of agent → `(is_valid, agent_id)` |
+| `get_certificate(cert_id)` | Get compliance certificate → `CertificateInfo` |
+| `get_agent_certificate_ids(agent_id)` | List certificate IDs for an agent |
+| `get_compliance_status(agent_id)` | Get all certificates for an agent |
+| `issue_certificate(...)` | Issue certificate (requires SCORER_ROLE) |
+| `record_risk_score(...)` | Record risk score (requires SCORER_ROLE) |
 
 ## Links
 
-- GitHub: https://github.com/hbhqq9/agent-passport
-- Codeberg: https://codeberg.org/agl-governance/erc8226-adapter
+- [GitHub Repository](https://github.com/hbhqq9/agent-passport)
+- [White Paper](https://github.com/hbhqq9/agent-passport/blob/master/docs/agent-passport-whitepaper.md)
+- [Smart Contracts](https://github.com/hbhqq9/agent-passport/tree/master/contracts)
 
-*Powered by Agent Passport Governance*
+## License
+
+MIT

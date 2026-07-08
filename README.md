@@ -1,156 +1,55 @@
-# ERC-8226 Reference Implementation
+# Agent Passport
 
-Production-grade implementation of [ERC-8226: Regulated Agent Mandate](https://ethereum-magicians.org/t/erc-8226-regulated-agent-mandate/28208) on Base mainnet.
+**AI Agent Compliance Proof System for EU AI Act Art.50**
 
-## Overview
+Agent Passport provides on-chain compliance infrastructure enabling AI agents to prove regulatory compliance (EU AI Act Article 50) through verifiable, tamper-proof credentials on Base Mainnet.
 
-This repository provides a **dual-layer architecture** for ERC-8226 compliance:
+## Quick Start
 
-1. **ERC8226Adapter** - Standard IComplianceProvider interface (ERC-8226 compliant)
-2. **ComplianceEngine** - Enhanced implementation with audit chain, role separation, and upgradeability
-
-## Problem Solved
-
-The official ERC-8226 specification (PR #1844, merged 2026-06-29) defines `IComplianceProvider` with:
-- `grantPrincipal(address, bytes32 identityRef, uint48 expiresAt)`
-- `revokePrincipal(address, ReasonCode)`
-- `checkPrincipal(address, bytes32 identityRef)`
-
-However, production compliance systems often require additional features:
-- HMAC audit chains for tamper-proof records
-- Role-based access control (separation of duties)
-- UUPS upgradeability for protocol evolution
-- Emergency pause mechanisms
-
-This implementation bridges the gap by providing an **adapter pattern** that exposes the standard ERC-8226 interface while delegating to an enhanced compliance engine.
-
-## Contract Addresses (Base Mainnet)
-
-| Contract | Address | Description |
-|----------|---------|-------------|
-| ERC8226Adapter | `0xE87b5F4D18E431cBFb281A5Af376DAE2995bbC0d` | Standard IComplianceProvider interface |
-| ComplianceEngine (Proxy) | `0xa493ae1230adf41a0d55bd405a9caa3e90e7e0d2` | Enhanced engine with audit chain |
-| TransparencyLogger | `0xcC567FCd0ea1C92039483bCc01b7aC9bc45E19C7` | EU AI Act Art.50 transparency proofs |
-
-## Architecture
-
-```
-┌─────────────────────────────────────────┐
-│   ERC-8226 AgentMandate Contract        │
-│   (calls IComplianceProvider)           │
-└────────────────┬────────────────────────┘
-                 │
-                 ▼
-┌─────────────────────────────────────────┐
-│   ERC8226Adapter                        │
-│   - grantPrincipal / revokePrincipal    │
-│   - checkPrincipal                      │
-│   - ERC165 interface detection          │
-└────────────────┬────────────────────────┘
-                 │ delegates to
-                 ▼
-┌─────────────────────────────────────────┐
-│   ComplianceEngine (Enhanced)           │
-│   - HMAC audit chain                    │
-│   - Role-based access (ORACLE/OFFICER)  │
-│   - UUPS upgradeable                    │
-│   - Pausable emergency response         │
-└─────────────────────────────────────────┘
+```bash
+pip install agent-passport
 ```
 
-## Key Features
+```python
+from agent_passport import AgentPassportClient, passport_guard
 
-### ERC8226Adapter
-- ✅ Full ERC-8226 IComplianceProvider compliance
-- ✅ ERC165 interface detection
-- ✅ Delegates to enhanced ComplianceEngine
-- ✅ Backward compatible
+client = AgentPassportClient(rpc_url="https://mainnet.base.org")
 
-### ComplianceEngine
-- ✅ HMAC audit chain (tamper-proof records)
-- ✅ Role separation: ORACLE / COMPLIANCE_OFFICER / EMERGENCY
-- ✅ UUPS proxy pattern (upgradeable)
-- ✅ Pausable (emergency response)
-- ✅ ReentrancyGuard
-
-## Use Cases
-
-### For AI Agent Platforms
-Integrate ERC-8226 compliance delegation for regulated assets:
-- Tokenized securities
-- Real-world assets (RWA)
-- Regulated DeFi protocols
-
-### For Supervision Layers (e.g., Overmind)
-Pair the adapter with AI Agent monitoring:
-- **Overmind**: Agent behavior supervision + risk detection
-- **AGL**: Compliance delegation + audit trails
-- **Together**: Complete compliance stack for regulated industries
-
-## Integration Example
-
-```solidity
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.22;
-
-import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
-
-interface IComplianceProvider is IERC165 {
-    enum ReasonCode {
-        COMPLIANT, KYC_EXPIRED, AML_FLAG, NOT_ACCREDITED,
-        NOT_QUALIFIED, JURISDICTION_BLOCKED, IDENTITY_NOT_FOUND,
-        ATTESTATION_REVOKED, OTHER
-    }
-    
-    function grantPrincipal(address, bytes32, uint48) external;
-    function revokePrincipal(address, ReasonCode) external;
-    function checkPrincipal(address, bytes32) external view returns (bool, ReasonCode, uint48);
-}
-
-contract MyRegulatedAgent {
-    IComplianceProvider public complianceProvider;
-    
-    constructor(address _provider) {
-        complianceProvider = IComplianceProvider(_provider);
-    }
-    
-    function executeRegulatedTransaction(
-        bytes32 identityRef
-    ) external {
-        (bool eligible, , ) = complianceProvider.checkPrincipal(
-            msg.sender,
-            identityRef
-        );
-        require(eligible, "Not compliant");
-        
-        // Execute regulated transaction...
-    }
-}
+@passport_guard(required_scope="data_access")
+def handle_request(agent_id: str, query: str):
+    return f"Processing: {query}"
 ```
 
-## Deployment
+## Project Structure
 
-Contracts deployed on Base mainnet:
-- ERC8226Adapter: [0xE87b5F4D18E431cBFb281A5Af376DAE2995bbC0d](https://basescan.org/address/0xE87b5F4D18E431cBFb281A5Af376DAE2995bbC0d)
-- ComplianceEngine: [0xa493ae1230adf41a0d55bd405a9caa3e90e7e0d2](https://basescan.org/address/0xa493ae1230adf41a0d55bd405a9caa3e90e7e0d2)
+- `agent_passport/` - Python SDK package
+- `agent-passport/` - Whitepapers, architecture docs, analysis
+- `contracts/` - ERC-8226 Adapter smart contracts
+- `docs/` - Blog posts and announcements
+- `art50-self-assessment.html` - Art.50 compliance self-assessment tool
 
-## References
+## Deployed Contracts (Base Mainnet)
 
-- [ERC-8226 Specification](https://github.com/ethereum/ERCs/pull/1844)
-- [ERC-8226 Discussion](https://ethereum-magicians.org/t/erc-8226-regulated-agent-mandate/28208)
-- [EU AI Act Art.50](https://artificialintelligenceact.eu/)
-- [MiCA Regulation](https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX%3A32023R1114)
+| Contract | Address |
+|----------|---------|
+| AgentRegistry | `0xbfd8Be6cBDa1Fb7A262E2A49c321E083a73638C9` |
+| AgentPassport | `0x612Fdf1DFCABf73131DD1D517C5f365cC3FD4b96` |
+| AccessGateway | `0x3dD4c216bc82145CDb1AF30b94d84383aa9292f9` |
+| CompliancePassport | `0x799B35c31DeF0fB679F46026f81743D397A27959` |
+| ERC8226Adapter | `0xE87b5F4D18E431cBFb281A5Af376DAE2995bbC0d` |
+| OpenBD | `0x9Deb1842d10f536c91Ef69b1f146d4B84ACe966B` |
 
-## Collaboration
+## Documentation
 
-Open for collaboration with:
-- AI Agent supervision layers (Overmind, etc.)
-- Regulated DeFi protocols
-- RWA tokenization platforms
-- Compliance service providers
+- [V0 Whitepaper](agent-passport/AGENT_PASSPORT_WHITEPAPER_V0.md)
+- [中文白皮书](agent-passport/AGENT_PASSPORT_WHITEPAPER_V0_CN.md)
+- [Architecture](agent-passport/ARCHITECTURE.md)
+- [Competitive Research](agent-passport/COMPETITIVE_RESEARCH.md)
+- [V0.1 Pivot Strategy](agent-passport/AGENT_PASSPORT_DUAN_YONGPING_ANALYSIS.md)
 
-Contact: [GitHub Issues](https://github.com/yourusername/erc8226-reference-implementation/issues)
+## Links
 
-## License
+- GitHub: https://github.com/hbhqq9/agent-passport
+- Codeberg: https://codeberg.org/agl-governance/erc8226-adapter
 
-MIT
+*Powered by Agent Passport Governance*

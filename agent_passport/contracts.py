@@ -4,10 +4,10 @@ Contract addresses and minimal ABIs for Agent Passport V0 on Base Mainnet.
 
 # ── Deployed Contract Addresses (Base Mainnet) ──────────────────────────────
 ADDRESSES = {
-    "AgentRegistry": "0xbfd8Be6cBDa1Fb7A262E2A49c321E083a73638C9",
-    "AgentPassport": "0x612Fdf1DFCABf73131DD1D517C5f365cC3FD4b96",
-    "AccessGateway": "0x3dD4c216bc82145CDb1AF30b94d84383aa9292f9",
-    "CompliancePassport": "0x799B35c31DeF0fB679F46026f81743D397A27959",
+    "AgentRegistry": "0xbeeFd54855e133055c6C5be8fD6549c3Fd92e0D9",
+    "AgentPassport": "0x5eBD4fCE45754c34557a237dd59cecec7A410c87",
+    "AccessGateway": "0xC46C3538Ea1Ea3dc41b762A2b298DD3C4cc65594",
+    "CompliancePassport": "0x1A086e034C7020CFE12d1ff8082Fc6aeD5787680",
 }
 
 # ── Minimal ABIs ────────────────────────────────────────────────────────────

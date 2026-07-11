@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: agent-passport-agl
-Version: 0.3.0
+Version: 0.4.0
 Summary: Python SDK for Agent Passport - AI Agent compliance proof system for EU AI Act Art.50
 License: MIT
 Project-URL: Homepage, https://github.com/hbhqq9/agent-passport

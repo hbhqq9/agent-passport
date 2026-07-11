@@ -422,14 +422,20 @@ class AgentPassportClient:
         agent_wallet: str,
         message: bytes,
         signature: bytes,
+        deadline: int = 0,
     ) -> Tuple[bool, int]:
         """
         Consume a proof-of-agent (state-changing, increments nonce).
+
+        V3.1-Final: Added deadline parameter for time-bound access control.
+        The deadline is NOT part of the EIP-712 signature (backward compatible),
+        but is validated on-chain by the gateway service.
 
         Args:
             agent_wallet: The agent's Ethereum address.
             message:      bytes32 message that was signed.
             signature:    EIP-712 signature bytes.
+            deadline:     Unix timestamp deadline (0 = no deadline / use default).
 
         Returns:
             Tuple of (is_valid: bool, agent_id: int).
@@ -442,7 +448,7 @@ class AgentPassportClient:
             message = message[:32]
         receipt = self._send_tx(
             self._access_gateway.functions.consumeProofOfAgent(
-                wallet_addr, message, signature
+                wallet_addr, message, deadline, signature
             )
         )
         # Parse return from logs or use view call to get current state
@@ -507,3 +513,28 @@ class AgentPassportClient:
             except Exception:
                 continue
         return certificates
+
+    def get_max_risk_score_records(self) -> int:
+        """
+        Get the maximum number of risk score records per agent (V3.1-Final).
+
+        Returns:
+            int: Maximum records allowed (default: 100).
+        """
+        return self._compliance_passport.functions.MAX_RISK_SCORE_RECORDS().call()
+
+    def is_registered_agent(self, wallet: str) -> bool:
+        """
+        Check if a wallet belongs to a registered and active agent (V3.1-Final).
+
+        This is a lightweight check that avoids returning string data,
+        making it safe for cross-contract calls under --via-ir optimization.
+
+        Args:
+            wallet: Ethereum address to check.
+
+        Returns:
+            bool: True if the wallet is registered and active.
+        """
+        wallet_addr = Web3.to_checksum_address(wallet)
+        return self._agent_registry.functions.isRegisteredAgent(wallet_addr).call()

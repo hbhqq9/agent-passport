@@ -18,7 +18,7 @@ from .guard import passport_guard, set_default_client, get_default_client, Compl
 from .compliance import Art50ComplianceChecker
 from .delegation import DelegationManager
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 __all__ = [
     "AgentPassportClient",
     "AgentInfo",

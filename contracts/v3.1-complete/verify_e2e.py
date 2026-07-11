@@ -4,14 +4,14 @@ import json, time
 from web3 import Web3
 
 RPC_URL = "https://mainnet.base.org"
-DEPLOYER_KEY = "0xREDACTED_KEY_COMPROMISED_1"
+DEPLOYER_KEY = "0xREDACTED_KEY_COMPROMISED_2"
 
 # V3.1-Complete addresses
 REGISTRY = Web3.to_checksum_address("0x594EeACA09186f86B7c4531b7cE63fb7480ce96C")
 PASSPORT = Web3.to_checksum_address("0x40B8A47A6A5249CDdB7428052f6Bd48f50D674cb")
 COMPLIANCE_NEW = Web3.to_checksum_address("0x3222df200137106E8e99E696d11Fbb8eB5bFDB27")
 GATEWAY_NEW = Web3.to_checksum_address("0xbe5ed70C5e23895859F5506ad8606C0BBa977240")
-DEPLOYER = Web3.to_checksum_address("0x903f5C71D87FCAb1FAC236F02Be94EF95Fa0Ea3B")
+DEPLOYER = Web3.to_checksum_address("0xa8F9c367DF92287c2Fd4C94B71CcE0fA681be3A5")
 
 w3 = Web3(Web3.HTTPProvider(RPC_URL))
 deployer = w3.eth.account.from_key(DEPLOYER_KEY)

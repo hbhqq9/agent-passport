@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 """E2E verification for V3.1-Complete deployment on Base Mainnet."""
-import json, time
+import json, time, os
 from web3 import Web3
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(__file__), '..', '..', '.env'))
+except ImportError:
+    pass  # .env already loaded by shell, or set manually
 
 RPC_URL = "https://mainnet.base.org"
-DEPLOYER_KEY = "0xREDACTED_KEY_COMPROMISED_2"
+DEPLOYER_KEY = os.environ['DEPLOYER_PRIVATE_KEY']  # must be set in .env
 
-# V3.1-Complete addresses
+# V3.1-Complete addresses (updated after fresh deployment)
 REGISTRY = Web3.to_checksum_address("0x594EeACA09186f86B7c4531b7cE63fb7480ce96C")
 PASSPORT = Web3.to_checksum_address("0x40B8A47A6A5249CDdB7428052f6Bd48f50D674cb")
-COMPLIANCE_NEW = Web3.to_checksum_address("0x3222df200137106E8e99E696d11Fbb8eB5bFDB27")
-GATEWAY_NEW = Web3.to_checksum_address("0xbe5ed70C5e23895859F5506ad8606C0BBa977240")
-DEPLOYER = Web3.to_checksum_address("0xa8F9c367DF92287c2Fd4C94B71CcE0fA681be3A5")
+COMPLIANCE_NEW = Web3.to_checksum_address("0x3222df200137106E8e99E696d11Fbb8eB5bFDB27")  # TBD: update after deploy
+GATEWAY_NEW = Web3.to_checksum_address("0xbe5ed70C5e23895859F5506ad8606C0BBa977240")  # TBD: update after deploy
+DEPLOYER = Web3.to_checksum_address("0x6c667Fc5c770bf7899b1843472f43C51b5c4Fecd")  # fresh deployer
 
 w3 = Web3(Web3.HTTPProvider(RPC_URL))
 deployer = w3.eth.account.from_key(DEPLOYER_KEY)

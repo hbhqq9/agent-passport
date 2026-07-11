@@ -3,12 +3,17 @@
 Only CompliancePassport and AccessGateway need redeployment (code changed).
 AgentRegistry and AgentPassport remain the same.
 """
-import json, time, sys
+import json, time, sys, os
 from web3 import Web3
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(__file__), '..', '..', '.env'))
+except ImportError:
+    pass  # .env already loaded by shell, or set manually
 
 # === Config ===
 RPC_URL = "https://mainnet.base.org"
-DEPLOYER_KEY = "0xREDACTED_KEY_COMPROMISED_2"
+DEPLOYER_KEY = os.environ['DEPLOYER_PRIVATE_KEY']  # must be set in .env
 REGISTRY_ADDR = "0x594EeACA09186f86B7c4531b7cE63fb7480ce96C"  # V3 (unchanged)
 PASSPORT_ADDR = "0x40B8A47A6A5249CDdB7428052f6Bd48f50D674cb"  # V3.1 (unchanged)
 BUILD_DIR = "./build"

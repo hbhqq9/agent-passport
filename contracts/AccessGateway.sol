@@ -2,20 +2,20 @@
 pragma solidity ^0.8.24;
 
 /**
- * @title AccessGateway V3.1-Complete
+ * @title AccessGateway
  * @author AGL Team
  * @notice 访问网关合约 — Agent 通过钱包签名生成 access token 登录 Web2 平台
- * @dev V3.1-Complete 安全修复 (合并两路审计全部发现):
+ * @dev V0 概念设计：链下验证 + 链上锚定，OAuth-like 流程
  *
- *   V3.1 修复项:
- *   - [MEDIUM] consumeProofOfAgent 增加 gatewayService/agentWallet 访问控制
- *   - [MEDIUM] verifyProofOfAgent/consumeProofOfAgent 增加 Agent active 状态检查
- *   - [MEDIUM] consumeProofOfAgent 增加 deadline 参数防止签名永久有效
- *   - [LOW] requestAccess 增加 platformId 已注册验证
- *   - [LOW] Session ID 增加 accessNonce 防止同块碰撞
+ * 架构层级: L3 — Access Layer
+ * 标准依赖: ERC-8004 (Identity), ERC-8196 (Policy-bound execution)
  *
- *   V3 修复项 (继承):
- *   - [HIGH] 修复 verifyProofOfAgent 跨链签名重放漏洞 (EIP-712)
+ * 核心流程:
+ *   1. Agent 用钱包签名生成 AccessRequest
+ *   2. 链下 Gateway 服务验证签名 + 检查 passport 状态
+ *   3. 签发短期 access token (链下 JWT-like)
+ *   4. 会话锚定到链上 (可选，用于审计)
+ *   5. 支持 OAuth-like 授权码流程
  */
 
 import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
@@ -46,51 +46,51 @@ contract AccessGateway is EIP712 {
         "AuthCode(address agentWallet,uint256 agentId,string platformId,string redirectURI,string codeChallenge,uint256 nonce,uint256 expiry)"
     );
 
-    bytes32 private constant PROOF_OF_AGENT_TYPEHASH = keccak256(
-        "ProofOfAgent(address agentWallet,uint256 agentId,bytes32 message,uint256 nonce)"
-    );
-
     // ========== 数据结构 ==========
 
+    /// @notice 访问请求状态
     enum AccessState {
-        NONE,
-        REQUESTED,
-        ACTIVE,
-        EXPIRED,
-        REVOKED
+        NONE,           // 未请求
+        REQUESTED,      // 已请求，待验证
+        ACTIVE,         // 活跃
+        EXPIRED,        // 已过期
+        REVOKED         // 已撤销
     }
 
+    /// @notice 访问会话
     struct AccessSession {
         bytes32 sessionId;
         address agentWallet;
         uint256 agentId;
-        string platformId;
-        string[] scopes;
+        string platformId;         // 目标平台标识
+        string[] scopes;           // 请求的权限范围
         AccessState state;
         uint256 issuedAt;
         uint256 expiresAt;
-        bytes32 anchorHash;
+        bytes32 anchorHash;        // 链上锚定哈希
     }
 
+    /// @notice 授权码 (OAuth-like 流程)
     struct AuthorizationCode {
         bytes32 codeHash;
         address agentWallet;
         uint256 agentId;
         string platformId;
         string redirectURI;
-        string codeChallenge;
+        string codeChallenge;      // PKCE challenge
         uint256 nonce;
         uint256 expiresAt;
         bool used;
         bool issued;
     }
 
+    /// @notice 平台注册信息
     struct PlatformInfo {
         string platformId;
-        address operator;
-        string callbackURI;
+        address operator;          // 平台运营方地址
+        string callbackURI;        // 回调地址
         bool active;
-        string[] supportedScopes;
+        string[] supportedScopes;  // 支持的权限范围
     }
 
     // ========== 状态变量 ==========
@@ -98,27 +98,70 @@ contract AccessGateway is EIP712 {
     IAgentRegistryForGateway public immutable agentRegistry;
     IAgentPassportForGateway public immutable agentPassport;
 
+    /// @notice Gateway 服务地址 (链下验证服务的链上身份)
     address public gatewayService;
 
+    /// @notice sessionId => AccessSession
     mapping(bytes32 => AccessSession) internal _sessions;
+
+    /// @notice agentWallet => 活跃会话列表
     mapping(address => bytes32[]) internal _agentSessions;
+
+    /// @notice codeHash => AuthorizationCode
     mapping(bytes32 => AuthorizationCode) internal _authCodes;
+
+    /// @notice platformId => PlatformInfo
     mapping(string => PlatformInfo) internal _platforms;
 
+    /// @notice agentWallet => nonce
     mapping(address => uint256) public accessNonces;
-    mapping(address => uint256) public proofOfAgentNonces;
 
+    /// @notice 管理员
     address public admin;
 
     // ========== 事件 ==========
 
-    event AccessRequested(bytes32 indexed sessionId, address indexed agentWallet, uint256 indexed agentId, string platformId, uint256 expiresAt);
-    event AccessGranted(bytes32 indexed sessionId, address indexed agentWallet, string platformId, bytes32 anchorHash);
-    event AccessRevoked(bytes32 indexed sessionId, string reason);
-    event AuthCodeIssued(bytes32 indexed codeHash, address indexed agentWallet, string platformId, uint256 expiresAt);
-    event AuthCodeExchanged(bytes32 indexed codeHash, bytes32 indexed sessionId);
-    event PlatformRegistered(string platformId, address indexed operator);
-    event SessionAnchored(bytes32 indexed sessionId, bytes32 anchorHash);
+    event AccessRequested(
+        bytes32 indexed sessionId,
+        address indexed agentWallet,
+        uint256 indexed agentId,
+        string platformId,
+        uint256 expiresAt
+    );
+
+    event AccessGranted(
+        bytes32 indexed sessionId,
+        address indexed agentWallet,
+        string platformId,
+        bytes32 anchorHash
+    );
+
+    event AccessRevoked(
+        bytes32 indexed sessionId,
+        string reason
+    );
+
+    event AuthCodeIssued(
+        bytes32 indexed codeHash,
+        address indexed agentWallet,
+        string platformId,
+        uint256 expiresAt
+    );
+
+    event AuthCodeExchanged(
+        bytes32 indexed codeHash,
+        bytes32 indexed sessionId
+    );
+
+    event PlatformRegistered(
+        string platformId,
+        address indexed operator
+    );
+
+    event SessionAnchored(
+        bytes32 indexed sessionId,
+        bytes32 anchorHash
+    );
 
     // ========== 构造函数 ==========
 
@@ -137,8 +180,17 @@ contract AccessGateway is EIP712 {
         admin = msg.sender;
     }
 
-    // ========== Agent 访问请求 ==========
+    // ========== Agent 访问请求 (Proof-of-Agent) ==========
 
+    /**
+     * @notice Agent 提交访问请求 (钱包签名)
+     * @dev Agent 用私钥签名 AccessRequest，提交到链上或链下 Gateway
+     * @param platformId 目标平台标识
+     * @param scopes 请求的权限范围
+     * @param expiry 请求有效期
+     * @param signature Agent 钱包的 EIP-712 签名
+     * @return sessionId 会话 ID
+     */
     function requestAccess(
         string calldata platformId,
         string[] calldata scopes,
@@ -148,16 +200,20 @@ contract AccessGateway is EIP712 {
         require(expiry > block.timestamp, "AccessGateway: expired");
         require(bytes(platformId).length > 0, "AccessGateway: empty platform");
         require(scopes.length > 0, "AccessGateway: no scopes");
-        // [V3.1 FIX] 验证 platformId 已注册
-        require(_platforms[platformId].active, "AccessGateway: platform not registered");
 
+        // 验证签名者是否为注册的 Agent 钱包
         uint256 nonce = accessNonces[msg.sender];
         uint256 agentId = agentRegistry.getAgentByWallet(msg.sender);
         require(agentId != 0, "AccessGateway: not registered agent");
 
         bytes32 structHash = keccak256(abi.encode(
-            ACCESS_REQUEST_TYPEHASH, msg.sender, agentId, platformId,
-            keccak256(abi.encode(scopes)), nonce, expiry
+            ACCESS_REQUEST_TYPEHASH,
+            msg.sender,
+            agentId,
+            platformId,
+            keccak256(abi.encode(scopes)),
+            nonce,
+            expiry
         ));
         bytes32 hash = _hashTypedDataV4(structHash);
         address signer = hash.recover(signature);
@@ -165,9 +221,9 @@ contract AccessGateway is EIP712 {
 
         accessNonces[msg.sender] = nonce + 1;
 
-        // [V3.1 FIX] Session ID 增加 nonce 防止同块碰撞
+        // 创建会话
         sessionId = keccak256(abi.encodePacked(
-            msg.sender, agentId, platformId, nonce, block.timestamp, accessNonces[msg.sender]
+            msg.sender, agentId, platformId, nonce, block.timestamp
         ));
 
         _sessions[sessionId] = AccessSession({
@@ -183,10 +239,18 @@ contract AccessGateway is EIP712 {
         });
 
         _agentSessions[msg.sender].push(sessionId);
+
         emit AccessRequested(sessionId, msg.sender, agentId, platformId, expiry);
     }
 
-    function grantAccess(bytes32 sessionId, bytes32 anchorHash) external {
+    /**
+     * @notice Gateway 服务批准访问 (链下验证后调用)
+     * @dev 仅 Gateway 服务可调用，代表链下验证通过
+     */
+    function grantAccess(
+        bytes32 sessionId,
+        bytes32 anchorHash
+    ) external {
         require(msg.sender == gatewayService, "AccessGateway: not gateway");
         AccessSession storage session = _sessions[sessionId];
         require(session.state == AccessState.REQUESTED, "AccessGateway: invalid state");
@@ -199,6 +263,9 @@ contract AccessGateway is EIP712 {
         emit SessionAnchored(sessionId, anchorHash);
     }
 
+    /**
+     * @notice Agent 自行撤销访问
+     */
     function revokeAccess(bytes32 sessionId, string calldata reason) external {
         AccessSession storage session = _sessions[sessionId];
         require(
@@ -206,12 +273,17 @@ contract AccessGateway is EIP712 {
             "AccessGateway: unauthorized"
         );
         require(session.state == AccessState.ACTIVE, "AccessGateway: not active");
+
         session.state = AccessState.REVOKED;
         emit AccessRevoked(sessionId, reason);
     }
 
     // ========== OAuth-like 授权码流程 ==========
 
+    /**
+     * @notice Agent 请求授权码 (PKCE 增强)
+     * @dev 类似 OAuth2 的 authorization_code flow + PKCE
+     */
     function requestAuthCode(
         string calldata platformId,
         string calldata redirectURI,
@@ -226,9 +298,16 @@ contract AccessGateway is EIP712 {
         require(agentId != 0, "AccessGateway: not registered agent");
 
         uint256 nonce = accessNonces[msg.sender];
+
         bytes32 structHash = keccak256(abi.encode(
-            AUTH_CODE_TYPEHASH, msg.sender, agentId, platformId,
-            redirectURI, codeChallenge, nonce, expiry
+            AUTH_CODE_TYPEHASH,
+            msg.sender,
+            agentId,
+            platformId,
+            redirectURI,
+            codeChallenge,
+            nonce,
+            expiry
         ));
         bytes32 hash = _hashTypedDataV4(structHash);
         address signer = hash.recover(signature);
@@ -256,6 +335,13 @@ contract AccessGateway is EIP712 {
         emit AuthCodeIssued(codeHash, msg.sender, platformId, expiry);
     }
 
+    /**
+     * @notice 交换授权码 (Gateway 服务验证 PKCE 后调用)
+     * @dev 类似 OAuth2 token exchange
+     * @param codeHash 授权码哈希
+     * @param codeVerifier PKCE code_verifier
+     * @return sessionId 创建的会话 ID
+     */
     function exchangeAuthCode(
         bytes32 codeHash,
         string calldata codeVerifier
@@ -266,6 +352,7 @@ contract AccessGateway is EIP712 {
         require(!code.used, "AccessGateway: code already used");
         require(block.timestamp <= code.expiresAt, "AccessGateway: code expired");
 
+        // PKCE 验证: SHA256(codeVerifier) == codeChallenge
         bytes32 challenge = sha256(abi.encodePacked(codeVerifier));
         require(
             keccak256(abi.encodePacked(challenge)) ==
@@ -275,8 +362,9 @@ contract AccessGateway is EIP712 {
 
         code.used = true;
 
+        // 创建会话
         sessionId = keccak256(abi.encodePacked(
-            code.agentWallet, code.agentId, code.platformId, code.nonce, block.timestamp, code.used
+            code.agentWallet, code.agentId, code.platformId, code.nonce, block.timestamp
         ));
 
         _sessions[sessionId] = AccessSession({
@@ -284,20 +372,24 @@ contract AccessGateway is EIP712 {
             agentWallet: code.agentWallet,
             agentId: code.agentId,
             platformId: code.platformId,
-            scopes: new string[](0),
+            scopes: new string[](0),  // 由平台方定义
             state: AccessState.ACTIVE,
             issuedAt: block.timestamp,
-            expiresAt: block.timestamp + 3600,
+            expiresAt: block.timestamp + 3600,  // 1 小时默认
             anchorHash: bytes32(0)
         });
 
         _agentSessions[code.agentWallet].push(sessionId);
+
         emit AuthCodeExchanged(codeHash, sessionId);
         emit AccessGranted(sessionId, code.agentWallet, code.platformId, bytes32(0));
     }
 
     // ========== 平台管理 ==========
 
+    /**
+     * @notice 注册平台
+     */
     function registerPlatform(
         string calldata platformId,
         string calldata callbackURI,
@@ -317,16 +409,29 @@ contract AccessGateway is EIP712 {
         emit PlatformRegistered(platformId, msg.sender);
     }
 
-    function getPlatform(string calldata platformId) external view returns (PlatformInfo memory) {
+    /**
+     * @notice 获取平台信息
+     */
+    function getPlatform(string calldata platformId)
+        external
+        view
+        returns (PlatformInfo memory)
+    {
         return _platforms[platformId];
     }
 
     // ========== 查询函数 ==========
 
+    /**
+     * @notice 获取会话状态
+     */
     function getSession(bytes32 sessionId) external view returns (AccessSession memory) {
         return _sessions[sessionId];
     }
 
+    /**
+     * @notice 获取 Agent 的活跃会话数量
+     */
     function getAgentActiveSessionCount(address agentWallet) external view returns (uint256) {
         bytes32[] storage sessions = _agentSessions[agentWallet];
         uint256 count = 0;
@@ -338,85 +443,31 @@ contract AccessGateway is EIP712 {
         return count;
     }
 
-    // ========== Proof-of-Agent ==========
-
     /**
-     * @notice 验证 Agent 的 Proof-of-Agent (view 版本)
-     * @dev [V3.1 FIX] 增加 Agent active 状态检查
+     * @notice 验证 Agent 的 Proof-of-Agent (替代 CAPTCHA)
+     * @dev 链下服务可调用此函数验证 Agent 身份
+     * @param agentWallet Agent 钱包地址
+     * @param message 验证消息
+     * @param signature Agent 签名
+     * @return isValid 身份是否有效
+     * @return agentId Agent ID
      */
     function verifyProofOfAgent(
         address agentWallet,
         bytes32 message,
-        uint256 nonce,
         bytes calldata signature
     ) external view returns (bool isValid, uint256 agentId) {
-        require(nonce == proofOfAgentNonces[agentWallet], "AccessGateway: invalid nonce");
-
-        uint256 agentIdLookup = agentRegistry.getAgentByWallet(agentWallet);
-
-        bytes32 structHash = keccak256(abi.encode(
-            PROOF_OF_AGENT_TYPEHASH, agentWallet, agentIdLookup, message, nonce
-        ));
-        bytes32 hash = _hashTypedDataV4(structHash);
-        address signer = hash.recover(signature);
-
+        // 1. 验证签名
+        address signer = message.toEthSignedMessageHash().recover(signature);
         if (signer != agentWallet) return (false, 0);
 
-        agentId = agentIdLookup;
+        // 2. 验证是否为注册的 Agent
+        agentId = agentRegistry.getAgentByWallet(agentWallet);
         if (agentId == 0) return (false, 0);
 
+        // 3. 验证 Agent 钱包绑定
         address boundWallet = agentRegistry.getAgentWallet(agentId);
         if (boundWallet != agentWallet) return (false, 0);
-
-        // [V3.1 FIX] 验证 Agent 活跃状态 (isRegisteredAgent 已包含 active 检查)
-        if (!agentRegistry.isRegisteredAgent(agentWallet)) return (false, 0);
-
-        return (true, agentId);
-    }
-
-    /**
-     * @notice 消费 Proof-of-Agent nonce (state-changing 版本)
-     * @dev [V3.1-Complete FIX] 合并三项修复:
-     *      1. 访问控制: 仅 gatewayService 或 agentWallet
-     *      2. Agent active 状态检查
-     *      3. [NEW] deadline 参数防止签名永久有效
-     */
-    function consumeProofOfAgent(
-        address agentWallet,
-        bytes32 message,
-        uint256 deadline,       // [V3.1-Complete NEW] 签名有效期截止时间
-        bytes calldata signature
-    ) external returns (bool isValid, uint256 agentId) {
-        // [V3.1 FIX #1] 访问控制
-        require(
-            msg.sender == gatewayService || msg.sender == agentWallet,
-            "AccessGateway: unauthorized"
-        );
-        // [V3.1-Complete FIX #3] deadline 检查
-        require(block.timestamp <= deadline, "AccessGateway: signature expired");
-
-        uint256 nonce = proofOfAgentNonces[agentWallet];
-        uint256 agentIdLookup = agentRegistry.getAgentByWallet(agentWallet);
-
-        bytes32 structHash = keccak256(abi.encode(
-            PROOF_OF_AGENT_TYPEHASH, agentWallet, agentIdLookup, message, nonce
-        ));
-        bytes32 hash = _hashTypedDataV4(structHash);
-        address signer = hash.recover(signature);
-
-        if (signer != agentWallet) return (false, 0);
-
-        agentId = agentIdLookup;
-        if (agentId == 0) return (false, 0);
-
-        address boundWallet = agentRegistry.getAgentWallet(agentId);
-        if (boundWallet != agentWallet) return (false, 0);
-
-        // [V3.1 FIX #2] 验证 Agent 活跃状态 (isRegisteredAgent 已包含 active 检查)
-        require(agentRegistry.isRegisteredAgent(agentWallet), "AccessGateway: agent inactive");
-
-        // 消费 nonce
-        proofOfAgentNonces[agentWallet] = nonce + 1;
 
         return (true, agentId);
     }

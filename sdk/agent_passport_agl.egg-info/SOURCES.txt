@@ -1,0 +1,14 @@
+README.md
+pyproject.toml
+agent_passport/__init__.py
+agent_passport/compliance.py
+agent_passport/contracts.py
+agent_passport/core.py
+agent_passport/delegation.py
+agent_passport/guard.py
+agent_passport_agl.egg-info/PKG-INFO
+agent_passport_agl.egg-info/SOURCES.txt
+agent_passport_agl.egg-info/dependency_links.txt
+agent_passport_agl.egg-info/requires.txt
+agent_passport_agl.egg-info/top_level.txt
+tests/test_core.py

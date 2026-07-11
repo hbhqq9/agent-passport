@@ -2,23 +2,22 @@
 pragma solidity ^0.8.24;
 
 /**
- * @title CompliancePassport V3.1-Complete
+ * @title CompliancePassport
  * @author AGL Team
  * @notice 合规护照合约 — 集成 ERC-8126 风险评分与 ERC-8226 合规状态
  * @dev 合规证明可导出/可验证，支持可移植的合规状态
  *
- * V3.1-Complete 安全修复 (合并两路审计全部发现):
- *   - [MEDIUM] _riskScores 无界数组 DoS 防护: 每个 Agent 最多 100 条评分记录
- *     防止恶意 SCORER 通过大量记录阻塞证书签发
+ * 架构层级: L3 — Compliance Layer
+ * 标准依赖:
+ *   - ERC-8126 (Agent Verification / Risk Score, Finalized)
+ *   - ERC-8226 (Regulated Agent Mandate / Compliance, our AGL)
+ *   - ERC-8004 (Agent Identity)
  *
- *   V3 安全修复 (继承):
- *   - [CRITICAL] 修复 EIP-712 Nonce 读写错位
- *   - [HIGH] 修复 issueCertificateBySignature riskScore 伪造
- *   - [HIGH] 修复 verifyComplianceProof 永久失效
- *
- *   已知限制 (V4 计划修复):
- *   - getCompositeRiskScore() 在 issueCertificate 调用时可被 SCORER_ROLE 前端运行操纵
- *     缓解方案: V4 引入 commit-reveal 或时间加权评分
+ * 核心功能:
+ *   1. 集成 ERC-8126 的 0-100 风险评分体系
+ *   2. 集成 ERC-8226 的合规委托状态
+ *   3. 合规证明可导出为可验证凭证
+ *   4. 支持多验证者评分聚合
  */
 
 import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
@@ -33,14 +32,21 @@ interface IAgentRegistryForCompliance {
     function getAgentWallet(uint256 agentId) external view returns (address);
 }
 
+/// @notice ERC-8126 风险评分接口 (兼容标准)
 interface IERC8126RiskScore {
     function getLatestRiskScore(uint256 agentId)
-        external view returns (uint8 score, uint256 updatedAt, address scorer);
+        external
+        view
+        returns (uint8 score, uint256 updatedAt, address scorer);
 }
 
+/// @notice ERC-8226 合规委托接口 (兼容标准)
 interface IERC8226Compliance {
     function getActivePrincipal(uint256 agentId)
-        external view returns (address principal, uint256 mandateExpiry);
+        external
+        view
+        returns (address principal, uint256 mandateExpiry);
+
     function isCompliant(uint256 agentId) external view returns (bool);
 }
 
@@ -51,40 +57,35 @@ contract CompliancePassport is EIP712, AccessControl {
     bytes32 public constant SCORER_ROLE = keccak256("SCORER_ROLE");
     bytes32 public constant COMPLIANCE_ORACLE_ROLE = keccak256("COMPLIANCE_ORACLE_ROLE");
 
-    /// @notice [V3.1-Complete FIX] 每个 Agent 最大评分记录数，防止无界数组 DoS
-    uint256 public constant MAX_RISK_SCORE_RECORDS = 100;
-
     // ========== EIP-712 类型 ==========
-    // [V3 FIX] 增加 signer 字段，将 nonce 与 signer 绑定
     bytes32 private constant COMPLIANCE_CERT_TYPEHASH = keccak256(
-        "ComplianceCertificate(address signer,uint256 agentId,uint8 complianceLevel,bytes32 evidenceHash,uint256 validUntil,uint256 nonce)"
-    );
-
-    bytes32 private constant RISK_SCORE_TYPEHASH = keccak256(
-        "RiskScore(address signer,uint256 agentId,uint8 score,uint256 validUntil,bytes32 evidenceHash,uint256 nonce)"
+        "ComplianceCertificate(uint256 agentId,uint8 riskScore,uint8 complianceLevel,bytes32 evidenceHash,uint256 validUntil,uint256 nonce)"
     );
 
     // ========== 数据结构 ==========
 
+    /// @notice 风险评分记录
     struct RiskScoreRecord {
-        uint8 score;
-        address scorer;
-        uint256 scoredAt;
-        uint256 validUntil;
-        bytes32 evidenceHash;
-        string scorerURI;
+        uint8 score;                  // 0-100, 0=最安全, 100=最高风险
+        address scorer;               // 评分者
+        uint256 scoredAt;             // 评分时间
+        uint256 validUntil;           // 有效期
+        bytes32 evidenceHash;         // 评分证据哈希 (ZK proof hash / audit data hash)
+        string scorerURI;             // 评分者信息 URI
         bool revoked;
     }
 
+    /// @notice 合规检查项
     enum ComplianceCheck {
-        IDENTITY_VERIFIED,
-        WALLET_CLEAN,
-        BEHAVIOR_NORMAL,
-        CODE_VERIFIED,
-        MANDATE_VALID,
-        KYC_CLEARED
+        IDENTITY_VERIFIED,     // 身份已验证
+        WALLET_CLEAN,          // 钱包无黑名单/制裁记录
+        BEHAVIOR_NORMAL,       // 行为模式正常 (非 bot)
+        CODE_VERIFIED,         // 智能合约代码已审计
+        MANDATE_VALID,         // ERC-8226 委托有效
+        KYC_CLEARED            // KYC 已通过
     }
 
+    /// @notice 合规状态记录
     struct ComplianceRecord {
         ComplianceCheck checkType;
         bool passed;
@@ -92,57 +93,69 @@ contract CompliancePassport is EIP712, AccessControl {
         uint256 verifiedAt;
         uint256 validUntil;
         bytes32 evidenceHash;
-        string details;
+        string details;          // 附加说明
     }
 
+    /// @notice 合规证书 (可导出凭证)
     struct ComplianceCertificate {
         uint256 certId;
         uint256 agentId;
-        uint8 riskScore;
-        uint8 complianceLevel;
-        bytes32 evidenceHash;
+        uint8 riskScore;           // 综合风险评分
+        uint8 complianceLevel;     // 合规等级 (0-5)
+        bytes32 evidenceHash;      // 完整证据包哈希
         uint256 validUntil;
         uint256 issuedAt;
         address issuer;
         bool revoked;
     }
 
+    /// @notice ERC-8226 委托状态
     struct MandateStatus {
         uint256 agentId;
-        address principal;
+        address principal;          // 委托人 (经 KYC 验证)
         uint256 mandateExpiry;
-        uint256 financialCap;
-        bytes32 scopeHash;
-        bool frozen;
+        uint256 financialCap;       // 财务上限
+        bytes32 scopeHash;          // 授权范围哈希
+        bool frozen;                // 是否被冻结
         uint256 lastVerified;
     }
 
+    /// @notice Agent 合规摘要
     struct ComplianceSummary {
         uint256 agentId;
-        uint8 compositeRiskScore;
-        uint8 complianceLevel;
-        uint256 validChecks;
-        uint256 totalChecks;
-        bool hasActiveMandate;
-        bool hasValidCertificate;
+        uint8 compositeRiskScore;   // 综合风险评分 (多评分者聚合)
+        uint8 complianceLevel;      // 合规等级
+        uint256 validChecks;        // 通过的检查项数
+        uint256 totalChecks;        // 总检查项数
+        bool hasActiveMandate;      // 是否有有效委托
+        bool hasValidCertificate;   // 是否有有效证书
         uint256 lastUpdated;
     }
 
     // ========== 状态变量 ==========
 
     IAgentRegistryForCompliance public immutable agentRegistry;
-    IERC8126RiskScore public erc8126Oracle;
-    IERC8226Compliance public erc8226Oracle;
+    IERC8126RiskScore public erc8126Oracle;       // 外部 ERC-8126 评分源 (可选)
+    IERC8226Compliance public erc8226Oracle;      // 外部 ERC-8226 合规源 (可选)
 
     uint256 private _nextCertId;
 
+    /// @notice agentId => 风险评分记录列表
     mapping(uint256 => RiskScoreRecord[]) internal _riskScores;
+
+    /// @notice agentId => ComplianceCheck => 记录列表
     mapping(uint256 => mapping(ComplianceCheck => ComplianceRecord[])) internal _complianceRecords;
+
+    /// @notice certId => 合规证书
     mapping(uint256 => ComplianceCertificate) internal _certificates;
+
+    /// @notice agentId => 证书 ID 列表
     mapping(uint256 => uint256[]) internal _agentCertificates;
+
+    /// @notice agentId => 委托状态
     mapping(uint256 => MandateStatus) internal _mandates;
 
-    /// @notice 签名 nonce — [V3] 统一按 signer 索引
+    /// @notice 签名 nonce
     mapping(address => uint256) public scorerNonces;
 
     // ========== 事件 ==========
@@ -208,6 +221,15 @@ contract CompliancePassport is EIP712, AccessControl {
 
     // ========== ERC-8126 风险评分集成 ==========
 
+    /**
+     * @notice 记录风险评分 (SCORER_ROLE)
+     * @dev 实现 ERC-8126 兼容的评分体系: 0=最安全, 100=最高风险
+     * @param agentId Agent ID
+     * @param score 风险评分 (0-100)
+     * @param validUntil 有效期
+     * @param evidenceHash 证据哈希 (ZK proof hash / 审计数据哈希)
+     * @param scorerURI 评分者信息
+     */
     function recordRiskScore(
         uint256 agentId,
         uint8 score,
@@ -218,11 +240,6 @@ contract CompliancePassport is EIP712, AccessControl {
         require(score <= 100, "CompliancePassport: score out of range");
         require(validUntil > block.timestamp, "CompliancePassport: invalid validity");
         _requireAgentExists(agentId);
-        // [V3.1-Complete FIX] 防止无界数组 DoS: 限制每个 Agent 最大评分记录数
-        require(
-            _riskScores[agentId].length < MAX_RISK_SCORE_RECORDS,
-            "CompliancePassport: too many risk score records"
-        );
 
         _riskScores[agentId].push(RiskScoreRecord({
             score: score,
@@ -239,12 +256,6 @@ contract CompliancePassport is EIP712, AccessControl {
 
     /**
      * @notice 通过签名记录风险评分 (链下签名 + 链上提交)
-     * @dev [V3 FIX] 修复 nonce 读写错位:
-     *      - 新增 signer 和 nonce 参数
-     *      - RISK_SCORE_TYPEHASH 增加 signer 字段
-     *      - nonce 统一从 signer 读取/写入
-     * @param signer 评分者 (签名者) 地址 — [V3 新增]
-     * @param nonce 当前 nonce 值 — [V3 新增]
      */
     function recordRiskScoreBySignature(
         uint256 agentId,
@@ -252,39 +263,22 @@ contract CompliancePassport is EIP712, AccessControl {
         uint256 validUntil,
         bytes32 evidenceHash,
         uint256 deadline,
-        bytes calldata signature,
-        address signer,       // [V3] 签名者地址
-        uint256 nonce         // [V3] 签名者当前 nonce
+        bytes calldata signature
     ) external {
         require(score <= 100, "CompliancePassport: score out of range");
         require(validUntil > block.timestamp, "CompliancePassport: invalid validity");
         require(block.timestamp <= deadline, "CompliancePassport: expired");
         _requireAgentExists(agentId);
-        // [V3.1-Complete FIX] 防止无界数组 DoS
-        require(
-            _riskScores[agentId].length < MAX_RISK_SCORE_RECORDS,
-            "CompliancePassport: too many risk score records"
-        );
 
-        // [V3 FIX] nonce 从 signer 读取，与签名绑定
-        require(nonce == scorerNonces[signer], "CompliancePassport: invalid nonce");
-
+        uint256 nonce = scorerNonces[msg.sender];
         bytes32 structHash = keccak256(abi.encode(
-            RISK_SCORE_TYPEHASH,
-            signer,           // [V3] signer 纳入签名数据
-            agentId,
-            score,
-            validUntil,
-            evidenceHash,
-            nonce
+            keccak256("RiskScore(uint256 agentId,uint8 score,uint256 validUntil,bytes32 evidenceHash,uint256 nonce)"),
+            agentId, score, validUntil, evidenceHash, nonce
         ));
         bytes32 hash = _hashTypedDataV4(structHash);
-        address recoveredSigner = hash.recover(signature);
+        address signer = hash.recover(signature);
 
-        require(recoveredSigner == signer, "CompliancePassport: signer mismatch");
-        require(hasRole(SCORER_ROLE, recoveredSigner), "CompliancePassport: not scorer");
-
-        // [V3 FIX] nonce 写入 signer (读写一致)
+        require(hasRole(SCORER_ROLE, signer), "CompliancePassport: not scorer");
         scorerNonces[signer] = nonce + 1;
 
         _riskScores[agentId].push(RiskScoreRecord({
@@ -300,13 +294,18 @@ contract CompliancePassport is EIP712, AccessControl {
         emit RiskScoreRecorded(agentId, score, signer, validUntil, evidenceHash);
     }
 
+    /**
+     * @notice 获取 Agent 最新风险评分 (ERC-8126 兼容)
+     */
     function getLatestRiskScore(uint256 agentId)
-        external view
+        external
+        view
         returns (uint8 score, uint256 updatedAt, address scorer)
     {
         RiskScoreRecord[] storage records = _riskScores[agentId];
         if (records.length == 0) return (255, 0, address(0));
 
+        // 从后往前找最新有效评分
         for (uint256 i = records.length; i > 0; i--) {
             RiskScoreRecord storage r = records[i - 1];
             if (!r.revoked && (r.validUntil == 0 || block.timestamp <= r.validUntil)) {
@@ -316,8 +315,12 @@ contract CompliancePassport is EIP712, AccessControl {
         return (255, 0, address(0));
     }
 
+    /**
+     * @notice 获取综合风险评分 (多评分者加权平均)
+     */
     function getCompositeRiskScore(uint256 agentId)
-        external view
+        external
+        view
         returns (uint8 compositeScore, uint256 scorerCount)
     {
         RiskScoreRecord[] storage records = _riskScores[agentId];
@@ -338,6 +341,9 @@ contract CompliancePassport is EIP712, AccessControl {
 
     // ========== 合规检查 ==========
 
+    /**
+     * @notice 记录合规检查通过
+     */
     function recordComplianceCheck(
         uint256 agentId,
         ComplianceCheck checkType,
@@ -361,8 +367,13 @@ contract CompliancePassport is EIP712, AccessControl {
         emit ComplianceCheckPassed(agentId, checkType, msg.sender, validUntil);
     }
 
+    /**
+     * @notice 检查某项合规是否通过
+     */
     function isComplianceCheckPassed(uint256 agentId, ComplianceCheck checkType)
-        external view returns (bool)
+        external
+        view
+        returns (bool)
     {
         ComplianceRecord[] storage records = _complianceRecords[agentId][checkType];
         for (uint256 i = records.length; i > 0; i--) {
@@ -376,6 +387,10 @@ contract CompliancePassport is EIP712, AccessControl {
 
     // ========== ERC-8226 委托状态集成 ==========
 
+    /**
+     * @notice 记录 ERC-8226 委托状态
+     * @dev 与 AGL 合约的合规委托集成
+     */
     function recordMandate(
         uint256 agentId,
         address principal,
@@ -400,8 +415,12 @@ contract CompliancePassport is EIP712, AccessControl {
         emit MandateRecorded(agentId, principal, mandateExpiry, financialCap);
     }
 
+    /**
+     * @notice 冻结委托 (监管触发)
+     */
     function freezeMandate(uint256 agentId, string calldata reason)
-        external onlyRole(DEFAULT_ADMIN_ROLE)
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
     {
         MandateStatus storage mandate = _mandates[agentId];
         require(mandate.agentId != 0, "CompliancePassport: no mandate");
@@ -411,6 +430,9 @@ contract CompliancePassport is EIP712, AccessControl {
         emit MandateFrozen(agentId, reason);
     }
 
+    /**
+     * @notice 检查委托是否有效
+     */
     function isMandateValid(uint256 agentId) external view returns (bool) {
         MandateStatus storage m = _mandates[agentId];
         if (m.agentId == 0) return false;
@@ -419,12 +441,19 @@ contract CompliancePassport is EIP712, AccessControl {
         return true;
     }
 
+    /**
+     * @notice 获取委托状态
+     */
     function getMandateStatus(uint256 agentId) external view returns (MandateStatus memory) {
         return _mandates[agentId];
     }
 
-    // ========== 合规证书 ==========
+    // ========== 合规证书 (可导出凭证) ==========
 
+    /**
+     * @notice 签发合规证书
+     * @dev 基于当前所有评分和检查结果生成综合证书
+     */
     function issueCertificate(
         uint256 agentId,
         uint8 complianceLevel,
@@ -435,6 +464,7 @@ contract CompliancePassport is EIP712, AccessControl {
         require(complianceLevel <= 5, "CompliancePassport: level out of range");
         require(validUntil > block.timestamp, "CompliancePassport: invalid validity");
 
+        // 获取当前综合评分
         (uint8 compositeScore,) = this.getCompositeRiskScore(agentId);
 
         certId = _nextCertId++;
@@ -457,59 +487,35 @@ contract CompliancePassport is EIP712, AccessControl {
 
     /**
      * @notice 通过签名签发证书 (链下签发)
-     * @dev [V3 FIX] 修复两个漏洞:
-     *      1. nonce 读写错位 (同 AgentPassport)
-     *      2. 不再接受外部 riskScore 参数，改为从链上已有评分记录读取
-     *         防止签名路径绕过实际风险评估直接设置 riskScore=0
-     *      - 新增 signer 和 nonce 参数
-     *      - 移除 riskScore 参数 (改为链上读取)
-     *      - COMPLIANCE_CERT_TYPEHASH 增加 signer 字段, 移除 riskScore
-     * @param signer 评分者 (签名者) 地址 — [V3 新增]
-     * @param nonce 当前 nonce 值 — [V3 新增]
      */
     function issueCertificateBySignature(
         uint256 agentId,
-        // [V3 FIX] 移除 riskScore 参数 — 从链上读取真实评分
+        uint8 riskScore,
         uint8 complianceLevel,
         bytes32 evidenceHash,
         uint256 validUntil,
         uint256 deadline,
-        bytes calldata signature,
-        address signer,       // [V3] 签名者地址
-        uint256 nonce         // [V3] 签名者当前 nonce
+        bytes calldata signature
     ) external returns (uint256 certId) {
         _requireAgentExists(agentId);
         require(block.timestamp <= deadline, "CompliancePassport: expired");
 
-        // [V3 FIX] nonce 从 signer 读取
-        require(nonce == scorerNonces[signer], "CompliancePassport: invalid nonce");
-
+        uint256 nonce = scorerNonces[msg.sender];
         bytes32 structHash = keccak256(abi.encode(
             COMPLIANCE_CERT_TYPEHASH,
-            signer,               // [V3] signer 纳入签名数据
-            agentId,
-            complianceLevel,
-            evidenceHash,
-            validUntil,
-            nonce
+            agentId, riskScore, complianceLevel, evidenceHash, validUntil, nonce
         ));
         bytes32 hash = _hashTypedDataV4(structHash);
-        address recoveredSigner = hash.recover(signature);
+        address signer = hash.recover(signature);
 
-        require(recoveredSigner == signer, "CompliancePassport: signer mismatch");
-        require(hasRole(SCORER_ROLE, recoveredSigner), "CompliancePassport: not scorer");
-
-        // [V3 FIX] nonce 写入 signer (读写一致)
+        require(hasRole(SCORER_ROLE, signer), "CompliancePassport: not scorer");
         scorerNonces[signer] = nonce + 1;
-
-        // [V3 FIX] 从链上已有记录读取真实 riskScore，不再使用外部传入值
-        (uint8 actualRiskScore,) = this.getCompositeRiskScore(agentId);
 
         certId = _nextCertId++;
         _certificates[certId] = ComplianceCertificate({
             certId: certId,
             agentId: agentId,
-            riskScore: actualRiskScore,   // [V3 FIX] 使用链上真实评分
+            riskScore: riskScore,
             complianceLevel: complianceLevel,
             evidenceHash: evidenceHash,
             validUntil: validUntil,
@@ -520,9 +526,12 @@ contract CompliancePassport is EIP712, AccessControl {
 
         _agentCertificates[agentId].push(certId);
 
-        emit CertificateIssued(certId, agentId, actualRiskScore, complianceLevel, validUntil);
+        emit CertificateIssued(certId, agentId, riskScore, complianceLevel, validUntil);
     }
 
+    /**
+     * @notice 撤销证书
+     */
     function revokeCertificate(uint256 certId, string calldata reason) external {
         ComplianceCertificate storage cert = _certificates[certId];
         require(cert.certId != 0, "CompliancePassport: cert not found");
@@ -538,15 +547,22 @@ contract CompliancePassport is EIP712, AccessControl {
 
     // ========== 合规证明导出/验证 ==========
 
+    /**
+     * @notice 导出完整合规证明包
+     * @dev 生成可供任何第三方验证的合规数据摘要
+     */
     function exportComplianceProof(uint256 agentId)
-        external view
+        external
+        view
         returns (
             ComplianceSummary memory summary,
             bytes32 proofHash
         )
     {
+        // 综合评分
         (uint8 compositeScore, uint256 scorerCount) = this.getCompositeRiskScore(agentId);
 
+        // 统计合规检查
         uint256 validChecks = 0;
         uint256 totalChecks = uint256(type(ComplianceCheck).max) + 1;
         for (uint256 i = 0; i < totalChecks; i++) {
@@ -561,10 +577,12 @@ contract CompliancePassport is EIP712, AccessControl {
             }
         }
 
+        // 委托状态
         MandateStatus storage m = _mandates[agentId];
         bool hasActiveMandate = m.agentId != 0 && !m.frozen &&
                                 block.timestamp <= m.mandateExpiry;
 
+        // 最新证书
         uint256[] memory certIds = _agentCertificates[agentId];
         bool hasValidCert = false;
         for (uint256 i = certIds.length; i > 0; i--) {
@@ -575,6 +593,7 @@ contract CompliancePassport is EIP712, AccessControl {
             }
         }
 
+        // 计算合规等级
         uint8 level = _calculateComplianceLevel(
             compositeScore, validChecks, totalChecks, hasActiveMandate, hasValidCert
         );
@@ -590,7 +609,7 @@ contract CompliancePassport is EIP712, AccessControl {
             lastUpdated: block.timestamp
         });
 
-        // [V3 FIX] proofHash 中包含动态 scorerCount (与 verifyComplianceProof 一致)
+        // 生成证明哈希
         proofHash = keccak256(abi.encode(
             summary,
             scorerCount,
@@ -603,37 +622,39 @@ contract CompliancePassport is EIP712, AccessControl {
 
     /**
      * @notice 链下验证合规证明 (静态函数)
-     * @dev [V3 FIX] 修复 verifyComplianceProof 永久失效漏洞:
-     *      - 函数从 pure 改为 view (需要读取链上状态)
-     *      - scorerCount 从硬编码 0 改为动态查询实际活跃评分者数量
-     *      - 生成的 proofHash 与 exportComplianceProof 一致
+     * @dev 供第三方 DApp 验证合规证明的完整性
      */
     function verifyComplianceProof(
         ComplianceSummary calldata summary,
         uint256 chainId,
         address passportContract,
         bytes32 expectedHash
-    ) external view returns (bool) {
-        // [V3 FIX] 动态查询实际活跃评分者数量，不再硬编码为 0
-        uint256 scorerCount = _getActiveScorerCount(summary.agentId);
-
+    ) external pure returns (bool) {
         bytes32 computedHash = keccak256(abi.encode(
             summary,
-            scorerCount,    // [V3 FIX] 使用动态值替代硬编码 0
+            0,  // scorerCount placeholder
             chainId,
             passportContract
         ));
         return computedHash == expectedHash;
     }
 
+    /**
+     * @notice 检查 Agent 是否满足最低合规要求
+     * @param agentId Agent ID
+     * @param maxRiskScore 最大可接受风险评分
+     * @param requiredChecks 必须通过的合规检查类型
+     */
     function meetsComplianceRequirement(
         uint256 agentId,
         uint8 maxRiskScore,
         ComplianceCheck[] calldata requiredChecks
     ) external view returns (bool) {
+        // 检查风险评分
         (uint8 compositeScore,) = this.getCompositeRiskScore(agentId);
         if (compositeScore > maxRiskScore) return false;
 
+        // 检查必须的合规检查
         for (uint256 i = 0; i < requiredChecks.length; i++) {
             ComplianceRecord[] storage records = _complianceRecords[agentId][requiredChecks[i]];
             bool passed = false;
@@ -652,11 +673,17 @@ contract CompliancePassport is EIP712, AccessControl {
 
     // ========== 外部 Oracle 设置 ==========
 
+    /**
+     * @notice 设置 ERC-8126 外部评分 Oracle
+     */
     function setERC8126Oracle(address oracle) external onlyRole(DEFAULT_ADMIN_ROLE) {
         erc8126Oracle = IERC8126RiskScore(oracle);
         emit OracleUpdated("ERC8126", oracle);
     }
 
+    /**
+     * @notice 设置 ERC-8226 外部合规 Oracle
+     */
     function setERC8226Oracle(address oracle) external onlyRole(DEFAULT_ADMIN_ROLE) {
         erc8226Oracle = IERC8226Compliance(oracle);
         emit OracleUpdated("ERC8226", oracle);
@@ -665,25 +692,33 @@ contract CompliancePassport is EIP712, AccessControl {
     // ========== 查询函数 ==========
 
     function getRiskScoreHistory(uint256 agentId)
-        external view returns (RiskScoreRecord[] memory)
+        external
+        view
+        returns (RiskScoreRecord[] memory)
     {
         return _riskScores[agentId];
     }
 
     function getComplianceRecords(uint256 agentId, ComplianceCheck checkType)
-        external view returns (ComplianceRecord[] memory)
+        external
+        view
+        returns (ComplianceRecord[] memory)
     {
         return _complianceRecords[agentId][checkType];
     }
 
     function getCertificate(uint256 certId)
-        external view returns (ComplianceCertificate memory)
+        external
+        view
+        returns (ComplianceCertificate memory)
     {
         return _certificates[certId];
     }
 
     function getAgentCertificateIds(uint256 agentId)
-        external view returns (uint256[] memory)
+        external
+        view
+        returns (uint256[] memory)
     {
         return _agentCertificates[agentId];
     }
@@ -713,21 +748,6 @@ contract CompliancePassport is EIP712, AccessControl {
         require(wallet != address(0), "CompliancePassport: agent not found");
     }
 
-    /**
-     * @notice [V3 新增] 获取 Agent 的活跃评分者数量
-     * @dev 用于 verifyComplianceProof 中动态计算 scorerCount
-     *      统计逻辑与 getCompositeRiskScore 一致: 未撤销且未过期的评分记录数
-     */
-    function _getActiveScorerCount(uint256 agentId) internal view returns (uint256 count) {
-        RiskScoreRecord[] storage records = _riskScores[agentId];
-        for (uint256 i = 0; i < records.length; i++) {
-            if (!records[i].revoked &&
-                (records[i].validUntil == 0 || block.timestamp <= records[i].validUntil)) {
-                count++;
-            }
-        }
-    }
-
     function _calculateComplianceLevel(
         uint8 riskScore,
         uint256 validChecks,
@@ -737,29 +757,38 @@ contract CompliancePassport is EIP712, AccessControl {
     ) internal pure returns (uint8) {
         uint256 score = 0;
 
+        // 风险评分贡献 (0-30 分)
         if (riskScore <= 20) score += 30;
         else if (riskScore <= 40) score += 20;
         else if (riskScore <= 60) score += 10;
 
+        // 合规检查贡献 (0-30 分)
         if (totalChecks > 0) {
             score += (validChecks * 30) / totalChecks;
         }
 
+        // 委托贡献 (0-20 分)
         if (hasMandate) score += 20;
+
+        // 证书贡献 (0-20 分)
         if (hasCert) score += 20;
 
-        if (score >= 90) return 5;
-        if (score >= 70) return 4;
-        if (score >= 50) return 3;
-        if (score >= 30) return 2;
-        if (score >= 10) return 1;
-        return 0;
+        // 映射到 0-5 等级
+        if (score >= 90) return 5;   // Fully Compliant
+        if (score >= 70) return 4;   // Mostly Compliant
+        if (score >= 50) return 3;   // Partially Compliant
+        if (score >= 30) return 2;   // Minimally Compliant
+        if (score >= 10) return 1;   // Non-Compliant
+        return 0;                     // Unverified
     }
 
     // ========== ERC-165 ==========
 
     function supportsInterface(bytes4 interfaceId)
-        public view override(AccessControl) returns (bool)
+        public
+        view
+        override(AccessControl)
+        returns (bool)
     {
         return super.supportsInterface(interfaceId);
     }
